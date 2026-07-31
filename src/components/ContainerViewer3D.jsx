@@ -42,8 +42,7 @@ function ItemBlock({ placement, highlighted, dimmed }) {
   );
 }
 
-export default function ContainerViewer3D({ packResult, stepIndex }) {
-  const container = packResult.container;
+export default function ContainerViewer3D({ instance, container, stepIndex }) {
 
   const cameraTarget = useMemo(
     () => [(container.length * SCALE) / 2, (container.height * SCALE) / 2, (container.width * SCALE) / 2],
@@ -60,7 +59,7 @@ export default function ContainerViewer3D({ packResult, stepIndex }) {
 
           <ContainerFrame container={container} />
 
-          {packResult.placements.map((p, i) => (
+          {instance.placements.map((p, i) => (
             <ItemBlock key={p.unitId} placement={p} highlighted={i === stepIndex - 1} dimmed={stepIndex !== null && i > stepIndex - 1} />
           ))}
 

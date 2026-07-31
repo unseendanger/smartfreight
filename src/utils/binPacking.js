@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// 3D BIN PACKING HEURISTIC
+// 3D BIN PACKING HEURISTIC (multi-container aware)
 // -----------------------------------------------------------------------
 // This is a deterministic "layer + shelf" heuristic, not an exhaustive
 // bin-packing solver (true 3D bin packing is NP-hard). It's the same family
@@ -9,13 +9,18 @@
 //      (this is what keeps the center of gravity near the floor).
 //   2. Walk boxes into horizontal "layers" (Z bands). Within a layer, boxes
 //      are packed left-to-right, then wrapped into new "shelf rows" along
-//      the width axis (this is a classic 2D shelf-packing sweep applied
-//      per layer).
+//      the width axis (a classic 2D shelf-packing sweep applied per layer).
 //   3. A new layer starts once a row can't fit within the container's
 //      width, and the layer's height climbs to the tallest box placed in it.
-//   4. Every placement is checked against the container footprint (for the
-//      LTL overhang rule), the container height, the running weight total,
-//      and the max-stack-weight rule of whatever box(es) it's resting on.
+//   4. If adding the next box would exceed the container's HEIGHT or
+//      WEIGHT cap, that box is deferred instead of forced in — once every
+//      remaining box has been tried against the current container, a brand
+//      new container instance opens and packing continues there. This is
+//      what lets a shipment automatically become "3 pallets" or "2 U-Boxes"
+//      instead of overflowing a single one.
+//   5. Every placement is still checked against the container footprint
+//      (LTL overhang rule) and the max-stack-weight rule of whatever it's
+//      resting on, per instance.
 //
 // Axes used throughout the file (and the 3D viewer):
 //   x = along container length   y = along container width   z = height
@@ -24,6 +29,7 @@
 import { CONTAINERS } from '../data/containers';
 
 const PALETTE = ['#3DBFA8', '#E8A23D', '#E86A5C', '#8B7CE8', '#5CA8E8', '#E8D75C', '#6BE87C', '#E85CAE'];
+const MAX_CONTAINER_INSTANCES = 60; // safety guard against pathological/oversized inputs
 
 /** Expand shipment line items (item + qty) into individual unit boxes. */
 function expandUnits(shipmentLines, itemsById) {
@@ -56,54 +62,72 @@ function aabbOverlapXY(a, b) {
 }
 
 /**
- * Runs the packing heuristic for a given container id and shipment lines.
- * Returns placements plus derived metrics used by the pricing engine and
- * the 3D visualizer / step slider.
+ * Packs as many units as will fit into ONE container instance using the
+ * layer+shelf sweep. Units that don't fit (would blow the height or weight
+ * cap) are returned as `leftover` so the caller can open a new instance.
+ *
+ * The very first unit of an instance is always placed even if it alone
+ * exceeds a limit (e.g. a single item taller than the container) — there's
+ * nowhere else to put it, so it's placed and flagged rather than dropped
+ * silently or looped on forever.
  */
-export function runPacking(containerId, shipmentLines, itemsById) {
-  const container = CONTAINERS[containerId];
-  const units = expandUnits(shipmentLines, itemsById);
-
-  // Heaviest first => mass settles into the lowest layers (center-of-gravity rule).
-  // Ties broken by base footprint area (largest first) for a tighter shelf pack.
-  units.sort((a, b) => b.weight - a.weight || b.length * b.width - a.length * a.width);
-
+function packOneContainer(container, units, colorByItem, colorState) {
   const placements = [];
+  const leftover = [];
   let cursorX = 0;
   let cursorY = 0;
   let cursorZ = 0;
-  let rowDepth = 0; // tallest-in-Y footprint of the current shelf row (in units.width terms, actually row's width extent)
-  let layerHeight = 0; // tallest box height placed in the current Z layer
-  let colorIndex = 0;
-  const colorByItem = {};
-
+  let rowDepth = 0;
+  let layerHeight = 0;
   let totalWeight = 0;
   let totalVolume = 0;
-  let overWeight = false;
+  let overhang = false;
   let overHeight = false;
-  let overhangDetected = false;
-  let anyStackViolation = false;
+  let overWeight = false;
+  let stackViolation = false;
 
   units.forEach((unit) => {
     if (!colorByItem[unit.itemId]) {
-      colorByItem[unit.itemId] = PALETTE[colorIndex % PALETTE.length];
-      colorIndex += 1;
+      colorByItem[unit.itemId] = PALETTE[colorState.i % PALETTE.length];
+      colorState.i += 1;
     }
 
-    // Does it fit in the current row along X? If not, wrap to a new row.
-    if (cursorX + unit.length > container.length && cursorX !== 0) {
-      cursorX = 0;
-      cursorY += rowDepth;
-      rowDepth = 0;
+    // Simulate where this unit WOULD land (shelf wrap, then layer wrap)
+    // without committing yet, so we can check the height/weight caps first.
+    let simX = cursorX;
+    let simY = cursorY;
+    let simZ = cursorZ;
+    let simRowDepth = rowDepth;
+    let simLayerHeight = layerHeight;
+
+    if (simX + unit.length > container.length && simX !== 0) {
+      simX = 0;
+      simY += simRowDepth;
+      simRowDepth = 0;
     }
-    // Does the row fit in the current layer along Y? If not, start a new layer (up).
-    if (cursorY + unit.width > container.width && cursorY !== 0) {
-      cursorX = 0;
-      cursorY = 0;
-      cursorZ += layerHeight;
-      layerHeight = 0;
-      rowDepth = 0;
+    if (simY + unit.width > container.width && simY !== 0) {
+      simX = 0;
+      simY = 0;
+      simZ += simLayerHeight;
+      simLayerHeight = 0;
+      simRowDepth = 0;
     }
+
+    const wouldExceedHeight = simZ + unit.height > container.height;
+    const wouldExceedWeight = totalWeight + unit.weight > container.maxWeight;
+
+    // Defer to the next container instance — unless this instance is still
+    // completely empty, in which case there's nowhere else for it to go.
+    if (placements.length > 0 && (wouldExceedHeight || wouldExceedWeight)) {
+      leftover.push(unit);
+      return;
+    }
+
+    cursorX = simX;
+    cursorY = simY;
+    cursorZ = simZ;
+    rowDepth = simRowDepth;
+    layerHeight = simLayerHeight;
 
     const placement = {
       unitId: unit.unitId,
@@ -126,86 +150,133 @@ export function runPacking(containerId, shipmentLines, itemsById) {
       loadSequence: placements.length + 1,
     };
 
-    // --- Rule checks -----------------------------------------------------
     if (placement.x + placement.length > container.footprint.length || placement.y + placement.width > container.footprint.width) {
       placement.overhang = true;
-      overhangDetected = true;
+      overhang = true;
     }
     if (placement.z + placement.height > container.height) {
       placement.overHeight = true;
-      overHeight = true;
+      overHeight = true; // only happens on a lone oversized item — see guard above
+    }
+    if (placement.weight > container.maxWeight) {
+      overWeight = true; // only happens on a lone overweight item
     }
 
-    // Stack-weight check: find whatever this box is resting directly on top of
-    // (touching supports whose top surface == this box's z and whose footprint
-    // overlaps), then confirm none of them are fragile / over their max stack weight.
     if (placement.z > 0) {
       const supports = placements.filter((p) => Math.abs(p.z + p.height - placement.z) < 0.01 && aabbOverlapXY(p, placement));
       supports.forEach((support) => {
-        if (support.fragile || support.maxStackWeight <= 0) {
-          placement.stackViolation = true;
-        } else if (placement.weight > support.maxStackWeight) {
+        if (support.fragile || support.maxStackWeight <= 0 || placement.weight > support.maxStackWeight) {
           placement.stackViolation = true;
         }
       });
-      if (placement.stackViolation) anyStackViolation = true;
+      if (placement.stackViolation) stackViolation = true;
     }
 
     placements.push(placement);
-
     totalWeight += unit.weight;
     totalVolume += unit.length * unit.width * unit.height;
-    if (totalWeight > container.maxWeight) overWeight = true;
 
     cursorX += unit.length;
     rowDepth = Math.max(rowDepth, unit.width);
     layerHeight = Math.max(layerHeight, unit.height);
   });
 
-  const containerVolume = container.length * container.width * container.height;
-  const cubeUtilization = containerVolume > 0 ? Math.min(100, (totalVolume / containerVolume) * 100) : 0;
+  return { placements, leftover, totalWeight, totalVolume, overhang, overHeight, overWeight, stackViolation };
+}
 
-  // Weighted center of gravity, expressed as a % offset from container center
-  // on each horizontal axis (0% = perfectly centered). Height-wise we report
-  // the mean weighted z as a fraction of container height (lower = more stable).
+function computeCenterOfGravity(placements, totalWeight, container) {
   let cgX = 0;
   let cgY = 0;
   let cgZ = 0;
   if (totalWeight > 0) {
     placements.forEach((p) => {
-      const centerX = p.x + p.length / 2;
-      const centerY = p.y + p.width / 2;
-      const centerZ = p.z + p.height / 2;
-      cgX += centerX * p.weight;
-      cgY += centerY * p.weight;
-      cgZ += centerZ * p.weight;
+      cgX += (p.x + p.length / 2) * p.weight;
+      cgY += (p.y + p.width / 2) * p.weight;
+      cgZ += (p.z + p.height / 2) * p.weight;
     });
     cgX /= totalWeight;
     cgY /= totalWeight;
     cgZ /= totalWeight;
   }
+  return {
+    x: cgX,
+    y: cgY,
+    z: cgZ,
+    xPct: container.length ? ((cgX - container.length / 2) / (container.length / 2)) * 100 : 0,
+    yPct: container.width ? ((cgY - container.width / 2) / (container.width / 2)) * 100 : 0,
+    heightPct: container.height ? (cgZ / container.height) * 100 : 0,
+  };
+}
+
+/**
+ * Runs the packing heuristic for a given container id and shipment lines.
+ * Automatically spans as many container INSTANCES as the load requires
+ * (e.g. "Pallet 1 of 3") rather than overflowing a single one.
+ */
+export function runPacking(containerId, shipmentLines, itemsById) {
+  const container = CONTAINERS[containerId];
+  const units = expandUnits(shipmentLines, itemsById);
+
+  // Heaviest first => mass settles into the lowest layers of each instance
+  // (center-of-gravity rule). Ties broken by base footprint area (largest first).
+  units.sort((a, b) => b.weight - a.weight || b.length * b.width - a.length * a.width);
+
+  const colorByItem = {};
+  const colorState = { i: 0 };
+  const containerVolume = container.length * container.width * container.height;
+
+  const instances = [];
+  let remaining = units;
+  let guard = 0;
+
+  while (remaining.length > 0 && guard < MAX_CONTAINER_INSTANCES) {
+    guard += 1;
+    const result = packOneContainer(container, remaining, colorByItem, colorState);
+    const totalValue = result.placements.reduce((sum, p) => sum + p.value, 0);
+    instances.push({
+      index: instances.length,
+      container,
+      placements: result.placements,
+      totalWeight: result.totalWeight,
+      totalVolume: result.totalVolume,
+      totalValue,
+      cubeUtilization: containerVolume ? Math.min(100, (result.totalVolume / containerVolume) * 100) : 0,
+      overhang: result.overhang,
+      overHeight: result.overHeight,
+      overWeight: result.overWeight,
+      stackViolation: result.stackViolation,
+      unitCount: result.placements.length,
+      centerOfGravity: computeCenterOfGravity(result.placements, result.totalWeight, container),
+    });
+    remaining = result.leftover;
+  }
+
+  const totalWeight = instances.reduce((s, inst) => s + inst.totalWeight, 0);
+  const totalVolume = instances.reduce((s, inst) => s + inst.totalVolume, 0);
+  const totalValue = instances.reduce((s, inst) => s + inst.totalValue, 0);
+  const unitCount = instances.reduce((s, inst) => s + inst.unitCount, 0);
+  const overhangDetected = instances.some((inst) => inst.overhang);
+  const overHeight = instances.some((inst) => inst.overHeight);
+  const overWeight = instances.some((inst) => inst.overWeight);
+  const anyStackViolation = instances.some((inst) => inst.stackViolation);
+  const cubeUtilization = instances.length
+    ? instances.reduce((s, inst) => s + inst.cubeUtilization, 0) / instances.length
+    : 0;
 
   return {
     containerId,
     container,
-    placements,
+    instances,
+    totalContainers: instances.length,
     totalWeight,
     totalVolume,
+    totalValue,
     containerVolume,
     cubeUtilization,
     overWeight,
     overHeight,
     overhangDetected,
     anyStackViolation,
-    totalValue: placements.reduce((sum, p) => sum + p.value, 0),
-    centerOfGravity: {
-      x: cgX,
-      y: cgY,
-      z: cgZ,
-      xPct: container.length ? ((cgX - container.length / 2) / (container.length / 2)) * 100 : 0,
-      yPct: container.width ? ((cgY - container.width / 2) / (container.width / 2)) * 100 : 0,
-      heightPct: container.height ? (cgZ / container.height) * 100 : 0,
-    },
-    unitCount: placements.length,
+    unitCount,
   };
 }

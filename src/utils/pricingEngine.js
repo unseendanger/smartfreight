@@ -16,9 +16,15 @@ const ACCESSORIAL_FEES = {
 
 const HIGH_VALUE_THRESHOLD = 10000;
 const HIGH_VALUE_RATE = 0.012; // 1.2% of declared value, once threshold is crossed
-const OVERHANG_FEE = 150;
+const OVERHANG_FEE = 150; // per pallet position that has an overhanging item
 const OVER_HEIGHT_FEE = 225;
 const OVER_WEIGHT_MULTIPLIER = 1.35; // spike, not a flat fee, per spec ("spikes the rates")
+
+// Charged per ADDITIONAL container beyond the first once a load auto-splits
+// across multiple pallets/U-Boxes — mirrors a real LTL "additional pallet
+// position" or per-unit rental/handling charge.
+const ADDITIONAL_PALLET_FEE = 45;
+const ADDITIONAL_UBOX_FEE = 180;
 
 function milesFromZips(originZip, destZip) {
   // No mapping API is available offline, so distance is derived deterministically
@@ -36,9 +42,11 @@ function applySurcharges(baseCost, packResult, accessorials) {
   const breakdown = [];
   let cost = baseCost;
 
-  if (packResult.overhangDetected && packResult.containerId === 'ltl_pallet') {
-    cost += OVERHANG_FEE;
-    breakdown.push({ label: 'Non-Standard Freight (Overhang)', amount: OVERHANG_FEE });
+  const overhangCount = packResult.instances ? packResult.instances.filter((inst) => inst.overhang).length : packResult.overhangDetected ? 1 : 0;
+  if (overhangCount > 0 && packResult.containerId === 'ltl_pallet') {
+    const fee = OVERHANG_FEE * overhangCount;
+    cost += fee;
+    breakdown.push({ label: `Non-Standard Freight (Overhang ×${overhangCount})`, amount: fee });
   }
   if (packResult.overHeight) {
     cost += OVER_HEIGHT_FEE;
@@ -48,6 +56,14 @@ function applySurcharges(baseCost, packResult, accessorials) {
     const spike = cost * (OVER_WEIGHT_MULTIPLIER - 1);
     cost += spike;
     breakdown.push({ label: 'Over-Weight Rate Spike (+35%)', amount: Math.round(spike) });
+  }
+  if (packResult.totalContainers > 1) {
+    const perUnitFee = packResult.containerId === 'uhaul_ubox' ? ADDITIONAL_UBOX_FEE : ADDITIONAL_PALLET_FEE;
+    const extraCount = packResult.totalContainers - 1;
+    const fee = perUnitFee * extraCount;
+    cost += fee;
+    const unitLabel = packResult.containerId === 'uhaul_ubox' ? 'U-Box' : 'Pallet';
+    breakdown.push({ label: `Additional ${unitLabel} Handling (${extraCount} extra, ${packResult.totalContainers} total)`, amount: fee });
   }
   if (packResult.totalValue > HIGH_VALUE_THRESHOLD) {
     const rider = Math.round(packResult.totalValue * HIGH_VALUE_RATE);
@@ -96,15 +112,21 @@ export function generateCarrierOptions(packResult, shipmentContext) {
   const hybridTransitDays = Math.max(1, Math.round(miles / 600) + 1);
   const hybrid = applySurcharges(hybridBase, packResult, accessorials);
 
+  const hasFragileItems = packResult.instances
+    ? packResult.instances.some((inst) => inst.placements.some((p) => p.fragile))
+    : false;
+
   const costPerLb = (cost) => cost / weight;
   const damageRiskScore = (base) => {
     // Lower is better. Fragile / stack-violating loads raise risk on every
     // option, but the fastest / hybrid options handle it a bit better than
-    // slow consolidated LTL freight (more handoffs = more risk).
+    // slow consolidated LTL freight (more handoffs = more risk). More
+    // container instances also mean more handling touchpoints.
     let risk = base;
     if (packResult.anyStackViolation) risk += 25;
     if (packResult.overhangDetected) risk += 10;
-    if (packResult.placements.some((p) => p.fragile)) risk += 8;
+    if (hasFragileItems) risk += 8;
+    if (packResult.totalContainers > 1) risk += Math.min(15, (packResult.totalContainers - 1) * 4);
     return Math.min(100, Math.max(0, risk));
   };
 

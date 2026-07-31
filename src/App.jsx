@@ -4,6 +4,7 @@ import InventoryManager from './components/InventoryManager';
 import ShipmentBuilder from './components/ShipmentBuilder';
 import ContainerViewer3D from './components/ContainerViewer3D';
 import ContainerTabs from './components/ContainerTabs';
+import InstanceSelector from './components/InstanceSelector';
 import LoadingStepSlider from './components/LoadingStepSlider';
 import ControlTower from './components/ControlTower';
 import { useInventory } from './hooks/useInventory';
@@ -16,7 +17,8 @@ export default function App() {
   const { items, addItem, updateItem, deleteItem } = useInventory();
   const { shipment, setContainerId, setQty, setDestination, setAccessorial } = useShipment();
   const [leftTab, setLeftTab] = useState('inventory');
-  const [stepIndex, setStepIndex] = useState(null); // null = show full load
+  const [stepIndex, setStepIndex] = useState(null); // null = show full load, within the selected instance
+  const [selectedInstance, setSelectedInstance] = useState(0);
 
   const itemsById = useMemo(() => Object.fromEntries(items.map((i) => [i.id, i])), [items]);
 
@@ -24,6 +26,14 @@ export default function App() {
     () => runPacking(shipment.containerId, shipment.lines, itemsById),
     [shipment.containerId, shipment.lines, itemsById]
   );
+
+  // Clamp the selected instance/step whenever the packing result changes shape
+  // (e.g. quantities dropped and the load no longer needs a 3rd pallet).
+  const clampedInstanceIndex = Math.min(selectedInstance, Math.max(0, packResult.instances.length - 1));
+  if (clampedInstanceIndex !== selectedInstance) {
+    setSelectedInstance(clampedInstanceIndex);
+  }
+  const currentInstance = packResult.instances[clampedInstanceIndex];
 
   const carrierResult = useMemo(
     () =>
@@ -69,10 +79,27 @@ export default function App() {
 
         {/* CENTER: 3D canvas */}
         <section className="col-span-5 flex flex-col gap-3">
-          <div className="flex items-center justify-between">
-            <ContainerTabs activeId={shipment.containerId} onSelect={setContainerId} />
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <ContainerTabs
+              activeId={shipment.containerId}
+              onSelect={(id) => {
+                setContainerId(id);
+                setSelectedInstance(0);
+                setStepIndex(null);
+              }}
+            />
+            <InstanceSelector
+              instances={packResult.instances}
+              containerLabel={packResult.container.shortLabel}
+              selected={clampedInstanceIndex}
+              setSelected={(updater) => {
+                setSelectedInstance(updater);
+                setStepIndex(null);
+              }}
+            />
             <span className="font-mono text-[11px] text-steel-400">
-              {packResult.unitCount} unit{packResult.unitCount === 1 ? '' : 's'} · {packResult.cubeUtilization.toFixed(1)}% cube used
+              {packResult.unitCount} unit{packResult.unitCount === 1 ? '' : 's'} total · {packResult.totalContainers} {packResult.container.shortLabel}
+              {packResult.totalContainers === 1 ? '' : 's'}
             </span>
           </div>
 
@@ -82,11 +109,11 @@ export default function App() {
                 Select item quantities under the Shipment tab to build a load.
               </div>
             ) : (
-              <ContainerViewer3D packResult={packResult} stepIndex={stepIndex} />
+              <ContainerViewer3D instance={currentInstance} container={packResult.container} stepIndex={stepIndex} />
             )}
           </div>
 
-          <LoadingStepSlider placements={packResult.placements} stepIndex={stepIndex} setStepIndex={setStepIndex} />
+          <LoadingStepSlider placements={currentInstance ? currentInstance.placements : []} stepIndex={stepIndex} setStepIndex={setStepIndex} />
         </section>
 
         {/* RIGHT: Control tower */}
