@@ -26,6 +26,30 @@ const OVER_WEIGHT_MULTIPLIER = 1.35; // spike, not a flat fee, per spec ("spikes
 const ADDITIONAL_PALLET_FEE = 45;
 const ADDITIONAL_UBOX_FEE = 180;
 
+// Named carrier partners the simulation assigns to each option, so a quote
+// always says WHO is quoting it, not just a generic service description.
+// The pick is deterministic (hashed from the route + load), so the same
+// shipment always comes back with the same carrier rather than flickering
+// between re-renders.
+const CARRIER_POOLS = {
+  affordable: ['Roadrunner Freight Line', 'Southern Star LTL', 'Consolidated Freightways Co.', 'Highway Partners LTL'],
+  fastest: ['Apex Expedite', 'RapidLine Sprinter Co.', 'Vanguard Dedicated Logistics', 'BlueDart Expedited'],
+  bestOverall: ['Meridian Managed Logistics', 'Anchor Point Freight', 'Northbound Transit Co.', 'Summit Freight Solutions'],
+};
+
+function hashString(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i += 1) {
+    hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+function pickCarrier(optionKey, seedStr) {
+  const pool = CARRIER_POOLS[optionKey];
+  return pool[hashString(seedStr + optionKey) % pool.length];
+}
+
 function milesFromZips(originZip, destZip) {
   // No mapping API is available offline, so distance is derived deterministically
   // from the zip codes themselves (a stable pseudo-distance), which keeps the
@@ -93,6 +117,7 @@ export function generateCarrierOptions(packResult, shipmentContext) {
   const cwt = weight / 100; // hundredweight, standard LTL rating unit
 
   const disabled = packResult.overWeight && packResult.containerId === 'ltl_pallet' && weight > 4600 * 1.25;
+  const carrierSeed = `${originZip}-${destZip}-${packResult.containerId}-${packResult.totalContainers}-${Math.round(weight)}`;
 
   // --- Option A: Most Affordable (Standard LTL / consolidation space) ----
   const affordableBase = 85 + cwt * 11.5 + miles * 0.38;
@@ -134,6 +159,7 @@ export function generateCarrierOptions(packResult, shipmentContext) {
     affordable: {
       key: 'affordable',
       label: 'Most Affordable',
+      carrier: pickCarrier('affordable', carrierSeed),
       service: 'Standard LTL Freight (Consolidated)',
       cost: Math.round(affordable.cost),
       breakdown: affordable.breakdown,
@@ -145,6 +171,7 @@ export function generateCarrierOptions(packResult, shipmentContext) {
     fastest: {
       key: 'fastest',
       label: 'Fastest Time',
+      carrier: pickCarrier('fastest', carrierSeed),
       service: 'Dedicated Sprinter / Expedited Air',
       cost: Math.round(fastest.cost),
       breakdown: fastest.breakdown,
@@ -156,6 +183,7 @@ export function generateCarrierOptions(packResult, shipmentContext) {
     bestOverall: {
       key: 'bestOverall',
       label: 'Best Overall',
+      carrier: pickCarrier('bestOverall', carrierSeed),
       service: packResult.containerId === 'uhaul_ubox' ? 'U-Box Managed Transit' : 'Hybrid Managed LTL',
       cost: Math.round(hybrid.cost),
       breakdown: hybrid.breakdown,
@@ -187,5 +215,10 @@ export function generateCarrierOptions(packResult, shipmentContext) {
     );
   });
 
-  return { options, miles };
+  // Whichever option scores highest on the blended Value Index is the one
+  // the dashboard recommends going with, named explicitly (carrier + option)
+  // rather than leaving the user to infer it from three separate cards.
+  const recommended = all.reduce((best, o) => (o.valueIndex > best.valueIndex ? o : best), all[0]);
+
+  return { options, miles, recommended: { key: recommended.key, label: recommended.label, carrier: recommended.carrier, valueIndex: recommended.valueIndex } };
 }

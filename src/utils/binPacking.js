@@ -61,6 +61,109 @@ function aabbOverlapXY(a, b) {
   return a.x < b.x + b.length && a.x + a.length > b.x && a.y < b.y + b.width && a.y + a.width > b.y;
 }
 
+// All 6 ways a rectangular box can be oriented (every axis permutation).
+// [length, width, height] for each — this is what lets the packer lay an
+// item on its side, stand it up, or turn it 90° to fit a tight gap instead
+// of only ever placing it in its original "flat" orientation.
+function orientationsFor(unit) {
+  const { length: l, width: w, height: h } = unit;
+  const perms = [
+    [l, w, h],
+    [w, l, h],
+    [l, h, w],
+    [h, l, w],
+    [w, h, l],
+    [h, w, l],
+  ];
+  // De-dupe identical permutations (cubes, or items with two equal sides).
+  const seen = new Set();
+  return perms.filter(([ol, ow, oh]) => {
+    const key = `${ol}x${ow}x${oh}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * Simulates dropping a box of given (ol, ow, oh) at the current cursor,
+ * applying the same row-wrap / layer-wrap rules used everywhere else.
+ * Returns the landing position plus how "disruptive" the placement was
+ * (0 = slots into the current row, 1 = wraps to a new row, 2 = wraps to
+ * a whole new layer) so callers can prefer the least disruptive fit.
+ */
+function simulateDrop(container, ol, ow, oh, cursorX, cursorY, cursorZ, rowDepth, layerHeight) {
+  let simX = cursorX;
+  let simY = cursorY;
+  let simZ = cursorZ;
+  let simRowDepth = rowDepth;
+  let simLayerHeight = layerHeight;
+  let wrapLevel = 0;
+
+  if (simX + ol > container.length && simX !== 0) {
+    simX = 0;
+    simY += simRowDepth;
+    simRowDepth = 0;
+    wrapLevel = 1;
+  }
+  if (simY + ow > container.width && simY !== 0) {
+    simX = 0;
+    simY = 0;
+    simZ += simLayerHeight;
+    simLayerHeight = 0;
+    simRowDepth = 0;
+    wrapLevel = 2;
+  }
+
+  return {
+    x: simX,
+    y: simY,
+    z: simZ,
+    rowDepth: simRowDepth,
+    layerHeight: simLayerHeight,
+    wrapLevel,
+    fitsFootprint: simX + ol <= container.length && simY + ow <= container.width,
+    leftoverRow: container.length - (simX + ol),
+  };
+}
+
+/**
+ * Tries every orientation of a unit against the current cursor and picks
+ * the one that packs tightest: prefer whichever disturbs the layout least
+ * (doesn't force a new row/layer), then whichever leaves the least wasted
+ * space in the row, then the lowest profile (shorter height first, which
+ * keeps more headroom for stacking and helps center of gravity).
+ */
+function chooseBestOrientation(container, unit, cursorX, cursorY, cursorZ, rowDepth, layerHeight, isFirstInInstance) {
+  const candidates = [];
+  orientationsFor(unit).forEach(([ol, ow, oh]) => {
+    const drop = simulateDrop(container, ol, ow, oh, cursorX, cursorY, cursorZ, rowDepth, layerHeight);
+    const exceedsHeight = drop.z + oh > container.height;
+    // Once at least one item is already in this instance, an orientation
+    // that busts the height cap is skipped entirely — it'll be retried
+    // (fresh cursor) in the next container instance instead.
+    if (!isFirstInInstance && exceedsHeight) return;
+    candidates.push({ ol, ow, oh, drop, exceedsHeight });
+  });
+
+  if (candidates.length === 0) {
+    // Nothing fits height-wise even after trying every rotation, but this
+    // is the first item in the instance — place the shortest orientation
+    // anyway (least overflow) and flag it rather than lose the item.
+    const shortest = orientationsFor(unit).reduce((best, o) => (o[2] < best[2] ? o : best));
+    const [ol, ow, oh] = shortest;
+    const drop = simulateDrop(container, ol, ow, oh, cursorX, cursorY, cursorZ, rowDepth, layerHeight);
+    return { ol, ow, oh, drop, exceedsHeight: true };
+  }
+
+  candidates.sort((a, b) => {
+    if (a.drop.wrapLevel !== b.drop.wrapLevel) return a.drop.wrapLevel - b.drop.wrapLevel;
+    if (a.drop.leftoverRow !== b.drop.leftoverRow) return a.drop.leftoverRow - b.drop.leftoverRow;
+    return a.oh - b.oh;
+  });
+  return candidates[0];
+}
+
 /**
  * Packs as many units as will fit into ONE container instance using the
  * layer+shelf sweep. Units that don't fit (would blow the height or weight
@@ -92,42 +195,24 @@ function packOneContainer(container, units, colorByItem, colorState) {
       colorState.i += 1;
     }
 
-    // Simulate where this unit WOULD land (shelf wrap, then layer wrap)
-    // without committing yet, so we can check the height/weight caps first.
-    let simX = cursorX;
-    let simY = cursorY;
-    let simZ = cursorZ;
-    let simRowDepth = rowDepth;
-    let simLayerHeight = layerHeight;
-
-    if (simX + unit.length > container.length && simX !== 0) {
-      simX = 0;
-      simY += simRowDepth;
-      simRowDepth = 0;
-    }
-    if (simY + unit.width > container.width && simY !== 0) {
-      simX = 0;
-      simY = 0;
-      simZ += simLayerHeight;
-      simLayerHeight = 0;
-      simRowDepth = 0;
-    }
-
-    const wouldExceedHeight = simZ + unit.height > container.height;
+    // Try every rotation of this unit against the current cursor and take
+    // whichever orientation packs tightest (see chooseBestOrientation).
+    const choice = chooseBestOrientation(container, unit, cursorX, cursorY, cursorZ, rowDepth, layerHeight, placements.length === 0);
+    const { ol, ow, oh, drop, exceedsHeight } = choice;
     const wouldExceedWeight = totalWeight + unit.weight > container.maxWeight;
 
     // Defer to the next container instance — unless this instance is still
     // completely empty, in which case there's nowhere else for it to go.
-    if (placements.length > 0 && (wouldExceedHeight || wouldExceedWeight)) {
+    if (placements.length > 0 && (exceedsHeight || wouldExceedWeight)) {
       leftover.push(unit);
       return;
     }
 
-    cursorX = simX;
-    cursorY = simY;
-    cursorZ = simZ;
-    rowDepth = simRowDepth;
-    layerHeight = simLayerHeight;
+    cursorX = drop.x;
+    cursorY = drop.y;
+    cursorZ = drop.z;
+    rowDepth = drop.rowDepth;
+    layerHeight = drop.layerHeight;
 
     const placement = {
       unitId: unit.unitId,
@@ -136,9 +221,10 @@ function packOneContainer(container, units, colorByItem, colorState) {
       x: cursorX,
       y: cursorY,
       z: cursorZ,
-      length: unit.length,
-      width: unit.width,
-      height: unit.height,
+      length: ol,
+      width: ow,
+      height: oh,
+      rotated: ol !== unit.length || ow !== unit.width || oh !== unit.height,
       weight: unit.weight,
       value: unit.value,
       fragile: unit.fragile,
@@ -174,11 +260,11 @@ function packOneContainer(container, units, colorByItem, colorState) {
 
     placements.push(placement);
     totalWeight += unit.weight;
-    totalVolume += unit.length * unit.width * unit.height;
+    totalVolume += ol * ow * oh;
 
-    cursorX += unit.length;
-    rowDepth = Math.max(rowDepth, unit.width);
-    layerHeight = Math.max(layerHeight, unit.height);
+    cursorX += ol;
+    rowDepth = Math.max(rowDepth, ow);
+    layerHeight = Math.max(layerHeight, oh);
   });
 
   return { placements, leftover, totalWeight, totalVolume, overhang, overHeight, overWeight, stackViolation };

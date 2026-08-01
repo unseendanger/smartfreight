@@ -11,7 +11,11 @@ function ContainerFrame({ container }) {
     <group position={[(length * SCALE) / 2, (height * SCALE) / 2, (width * SCALE) / 2]}>
       <mesh>
         <boxGeometry args={[length * SCALE, height * SCALE, width * SCALE]} />
-        <meshBasicMaterial color="#3DBFA8" transparent opacity={0.04} />
+        {/* depthWrite=false: this is just a translucent reference shell around the
+            load. Without this, its faces can win the depth test against solid
+            item boxes depending on transparent-object draw order, which is what
+            was making boxes near the camera intermittently vanish. */}
+        <meshBasicMaterial color="#3DBFA8" transparent opacity={0.04} depthWrite={false} />
         <Edges color="#3DBFA8" />
       </mesh>
     </group>
@@ -25,18 +29,27 @@ function ItemBlock({ placement, highlighted, dimmed }) {
   const cz = (y + width / 2) * SCALE;
   const violation = placement.overhang || placement.overHeight || placement.stackViolation;
 
+  // Only "dimmed" boxes (hidden ahead of the current loading step) need
+  // alpha blending. Every other box renders fully opaque so the WebGL
+  // depth buffer alone decides what's in front — alpha-blended objects are
+  // sorted per-object by the renderer, and with dozens of overlapping crates
+  // that sort can get it wrong and make boxes nearest the camera disappear
+  // until you rotate the view. Opaque geometry doesn't have that problem.
   return (
     <group position={[cx, cy, cz]}>
       <mesh>
         <boxGeometry args={[length * SCALE * 0.97, height * SCALE * 0.97, width * SCALE * 0.97]} />
         <meshStandardMaterial
           color={violation ? '#E86A5C' : color}
-          transparent
-          opacity={dimmed ? 0.12 : highlighted ? 1 : 0.85}
+          transparent={dimmed}
+          opacity={dimmed ? 0.12 : 1}
+          depthWrite={!dimmed}
           roughness={0.5}
           metalness={0.1}
+          emissive={highlighted ? (violation ? '#E86A5C' : color) : '#000000'}
+          emissiveIntensity={highlighted ? 0.35 : 0}
         />
-        <Edges color={violation ? '#ffffff' : '#0A0E14'} opacity={0.4} transparent />
+        <Edges color={violation ? '#ffffff' : '#0A0E14'} opacity={dimmed ? 0.15 : 1} transparent={dimmed} />
       </mesh>
     </group>
   );

@@ -26,6 +26,7 @@ export default function DecisionCard({ option, isBest }) {
         </div>
         <div>
           <p className={`font-display text-sm font-semibold ${accent.text}`}>{option.label}</p>
+          <p className="text-[11px] text-steel-300 font-medium">{option.carrier}</p>
           <p className="text-[11px] text-steel-400">{option.service}</p>
         </div>
       </div>

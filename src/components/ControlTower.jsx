@@ -1,4 +1,4 @@
-import { Gauge, Scale, Box, TriangleAlert, RadioTower, Layers } from 'lucide-react';
+import { Gauge, Scale, Box, TriangleAlert, RadioTower, Layers, Trophy } from 'lucide-react';
 import DecisionCard from './DecisionCard';
 
 function ReadoutTile({ icon: Icon, label, value, sub, warn }) {
@@ -15,8 +15,9 @@ function ReadoutTile({ icon: Icon, label, value, sub, warn }) {
 }
 
 export default function ControlTower({ packResult, carrierResult }) {
-  const { options } = carrierResult;
+  const { options, recommended } = carrierResult;
   const bestKey = Object.values(options).reduce((best, o) => (o.valueIndex > (options[best]?.valueIndex ?? -1) ? o.key : best), 'bestOverall');
+  const bestOption = options[bestKey];
 
   const totalPenalties = Object.values(options).reduce((sum, o) => sum + o.breakdown.reduce((s, b) => s + b.amount, 0), 0);
   const totalBase = Object.values(options).reduce((sum, o) => sum + (o.cost - o.breakdown.reduce((s, b) => s + b.amount, 0)), 0);
@@ -35,6 +36,17 @@ export default function ControlTower({ packResult, carrierResult }) {
           <p className="label-eyebrow">Live Monitor</p>
           <h2 className="font-display font-semibold text-steel-200">Logistics Control Tower</h2>
         </div>
+      </div>
+
+      <div className="rounded-lg border border-signal-amber/40 bg-gradient-to-r from-signal-amber/10 to-transparent p-3 flex items-center gap-3">
+        <div className="w-8 h-8 rounded-md bg-signal-amber/15 text-signal-amber flex items-center justify-center shrink-0">
+          <Trophy size={15} />
+        </div>
+        <p className="text-xs text-steel-200">
+          <span className="text-signal-amber font-semibold">Go with {recommended.carrier}</span> — {bestOption.label} at{' '}
+          <span className="font-mono">${bestOption.cost.toLocaleString()}</span>, {bestOption.transitDays}d transit. Highest blended
+          Value Index ({recommended.valueIndex}/100) across cost, speed, and damage risk.
+        </p>
       </div>
 
       {packResult.totalContainers > 1 && (
