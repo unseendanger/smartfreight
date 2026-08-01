@@ -25,7 +25,15 @@ export default function ShipmentBuilder({ items, shipment, setQty, setDestinatio
                     >
                       <Minus size={12} />
                     </button>
-                    <span className="font-mono text-sm w-5 text-center text-signal-teal">{qty}</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      className="w-14 bg-ink-900 border border-ink-600 rounded-md text-center font-mono text-sm text-signal-teal py-1 focus:border-signal-teal focus:ring-1 focus:ring-signal-teal/40 outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                      value={qty}
+                      onChange={(e) => setQty(item.id, e.target.value)}
+                      onFocus={(e) => e.target.select()}
+                    />
                     <button onClick={() => setQty(item.id, qty + 1)} className="w-6 h-6 flex items-center justify-center rounded-md bg-ink-700 text-steel-300 hover:bg-ink-600">
                       <Plus size={12} />
                     </button>

@@ -1,35 +1,45 @@
 // -----------------------------------------------------------------------
-// 3D BIN PACKING HEURISTIC (multi-container aware)
+// 3D BIN PACKING — GUILLOTINE FREE-SPACE PARTITIONING
 // -----------------------------------------------------------------------
-// This is a deterministic "layer + shelf" heuristic, not an exhaustive
-// bin-packing solver (true 3D bin packing is NP-hard). It's the same family
-// of approach warehouse slotting tools use for a fast, explainable plan:
+// A note on approach: true optimal 3D bin packing is an Integer Linear
+// Program (ILP) — NP-hard, and solving it exactly for anything beyond a
+// handful of boxes is not something that can run interactively in a
+// browser tab. Genetic algorithms / simulated annealing get closer to
+// optimal but need many generations (seconds to minutes) to converge and
+// are non-deterministic run to run, which doesn't fit "instantly recompute
+// on every quantity change." So this engine uses the practical middle
+// ground real packing tools reach for: a GUILLOTINE / TREE-BASED FREE-SPACE
+// PARTITIONING heuristic with best-fit search — a fast, deterministic
+// approximation that gets close to optimal utilization on typical loads.
 //
-//   1. Sort every unit box heaviest-first so mass naturally lands low
-//      (this is what keeps the center of gravity near the floor).
-//   2. Walk boxes into horizontal "layers" (Z bands). Within a layer, boxes
-//      are packed left-to-right, then wrapped into new "shelf rows" along
-//      the width axis (a classic 2D shelf-packing sweep applied per layer).
-//   3. A new layer starts once a row can't fit within the container's
-//      width, and the layer's height climbs to the tallest box placed in it.
-//   4. If adding the next box would exceed the container's HEIGHT or
-//      WEIGHT cap, that box is deferred instead of forced in — once every
-//      remaining box has been tried against the current container, a brand
-//      new container instance opens and packing continues there. This is
-//      what lets a shipment automatically become "3 pallets" or "2 U-Boxes"
-//      instead of overflowing a single one.
-//   5. Every placement is still checked against the container footprint
-//      (LTL overhang rule) and the max-stack-weight rule of whatever it's
-//      resting on, per instance.
+// How it works:
+//   1. The container starts as ONE free rectangular region (the "root" of
+//      the space tree).
+//   2. For each unit box (heaviest first, for center-of-gravity), the
+//      engine searches every open free region and every one of the box's
+//      6 orthogonal orientations (90° turns on any axis), and picks the
+//      (region, orientation) pair that WASTES THE LEAST volume — this is
+//      "best-fit" placement, which is what closes up the gaps a naive
+//      row-by-row sweep leaves behind.
+//   3. Placing the box there is a "guillotine cut": the remaining space in
+//      that region is split into up to 3 new smaller free regions (one to
+//      the right, one in front, one above), which get added back into the
+//      space tree for later boxes — including smaller boxes that come
+//      later and can slot into leftover slivers.
+//   4. Free regions that are fully contained inside another free region are
+//      pruned so the space tree doesn't grow unbounded.
+//   5. If nothing fits a region without breaking the height or weight cap,
+//      the unit is deferred to the next container instance (see the
+//      multi-container loop in runPacking below).
 //
-// Axes used throughout the file (and the 3D viewer):
-//   x = along container length   y = along container width   z = height
+// Axes: x = along container length, y = along container width, z = height.
 // -----------------------------------------------------------------------
 
 import { CONTAINERS } from '../data/containers';
 
 const PALETTE = ['#3DBFA8', '#E8A23D', '#E86A5C', '#8B7CE8', '#5CA8E8', '#E8D75C', '#6BE87C', '#E85CAE'];
 const MAX_CONTAINER_INSTANCES = 60; // safety guard against pathological/oversized inputs
+const EPS = 0.01; // inches — treats sub-hundredth-inch slivers as zero
 
 /** Expand shipment line items (item + qty) into individual unit boxes. */
 function expandUnits(shipmentLines, itemsById) {
@@ -61,10 +71,9 @@ function aabbOverlapXY(a, b) {
   return a.x < b.x + b.length && a.x + a.length > b.x && a.y < b.y + b.width && a.y + a.width > b.y;
 }
 
-// All 6 ways a rectangular box can be oriented (every axis permutation).
-// [length, width, height] for each — this is what lets the packer lay an
-// item on its side, stand it up, or turn it 90° to fit a tight gap instead
-// of only ever placing it in its original "flat" orientation.
+// All 6 ways a rectangular box can be oriented (every axis permutation) —
+// orthogonal 90° rotations only, as requested, so an item can lie flat,
+// stand on end, or turn sideways to slot into a tight leftover space.
 function orientationsFor(unit) {
   const { length: l, width: w, height: h } = unit;
   const perms = [
@@ -75,7 +84,6 @@ function orientationsFor(unit) {
     [w, h, l],
     [h, w, l],
   ];
-  // De-dupe identical permutations (cubes, or items with two equal sides).
   const seen = new Set();
   return perms.filter(([ol, ow, oh]) => {
     const key = `${ol}x${ow}x${oh}`;
@@ -85,103 +93,66 @@ function orientationsFor(unit) {
   });
 }
 
-/**
- * Simulates dropping a box of given (ol, ow, oh) at the current cursor,
- * applying the same row-wrap / layer-wrap rules used everywhere else.
- * Returns the landing position plus how "disruptive" the placement was
- * (0 = slots into the current row, 1 = wraps to a new row, 2 = wraps to
- * a whole new layer) so callers can prefer the least disruptive fit.
- */
-function simulateDrop(container, ol, ow, oh, cursorX, cursorY, cursorZ, rowDepth, layerHeight) {
-  let simX = cursorX;
-  let simY = cursorY;
-  let simZ = cursorZ;
-  let simRowDepth = rowDepth;
-  let simLayerHeight = layerHeight;
-  let wrapLevel = 0;
-
-  if (simX + ol > container.length && simX !== 0) {
-    simX = 0;
-    simY += simRowDepth;
-    simRowDepth = 0;
-    wrapLevel = 1;
-  }
-  if (simY + ow > container.width && simY !== 0) {
-    simX = 0;
-    simY = 0;
-    simZ += simLayerHeight;
-    simLayerHeight = 0;
-    simRowDepth = 0;
-    wrapLevel = 2;
-  }
-
-  return {
-    x: simX,
-    y: simY,
-    z: simZ,
-    rowDepth: simRowDepth,
-    layerHeight: simLayerHeight,
-    wrapLevel,
-    fitsFootprint: simX + ol <= container.length && simY + ow <= container.width,
-    leftoverRow: container.length - (simX + ol),
-  };
+/** Removes any free region that's fully enclosed inside another free region. */
+function pruneContainedRegions(regions) {
+  return regions.filter((a, i) => {
+    return !regions.some((b, j) => {
+      if (i === j) return false;
+      return (
+        a.x >= b.x - EPS &&
+        a.y >= b.y - EPS &&
+        a.z >= b.z - EPS &&
+        a.x + a.length <= b.x + b.length + EPS &&
+        a.y + a.width <= b.y + b.width + EPS &&
+        a.z + a.height <= b.z + b.height + EPS
+      );
+    });
+  });
 }
 
 /**
- * Tries every orientation of a unit against the current cursor and picks
- * the one that packs tightest: prefer whichever disturbs the layout least
- * (doesn't force a new row/layer), then whichever leaves the least wasted
- * space in the row, then the lowest profile (shorter height first, which
- * keeps more headroom for stacking and helps center of gravity).
+ * Searches every free region × every orientation of `unit` and returns the
+ * best-fit placement: the one that wastes the least volume in its region,
+ * tie-broken toward the floor (lower z) for stability, then toward the
+ * region already closest to the origin so the pack stays contiguous rather
+ * than scattering boxes across far-apart regions.
  */
-function chooseBestOrientation(container, unit, cursorX, cursorY, cursorZ, rowDepth, layerHeight, isFirstInInstance) {
-  const candidates = [];
-  orientationsFor(unit).forEach(([ol, ow, oh]) => {
-    const drop = simulateDrop(container, ol, ow, oh, cursorX, cursorY, cursorZ, rowDepth, layerHeight);
-    const exceedsHeight = drop.z + oh > container.height;
-    // Once at least one item is already in this instance, an orientation
-    // that busts the height cap is skipped entirely — it'll be retried
-    // (fresh cursor) in the next container instance instead.
-    if (!isFirstInInstance && exceedsHeight) return;
-    candidates.push({ ol, ow, oh, drop, exceedsHeight });
+function findBestFit(freeRegions, unit) {
+  let best = null;
+  freeRegions.forEach((region, regionIndex) => {
+    orientationsFor(unit).forEach(([ol, ow, oh]) => {
+      if (ol > region.length + EPS || ow > region.width + EPS || oh > region.height + EPS) return;
+      const wasted = region.length * region.width * region.height - ol * ow * oh;
+      const candidate = { regionIndex, region, ol, ow, oh, wasted };
+      if (
+        !best ||
+        region.z < best.region.z - EPS ||
+        (Math.abs(region.z - best.region.z) <= EPS &&
+          (wasted < best.wasted - EPS ||
+            (Math.abs(wasted - best.wasted) <= EPS && region.y < best.region.y - EPS) ||
+            (Math.abs(wasted - best.wasted) <= EPS && Math.abs(region.y - best.region.y) <= EPS && region.x < best.region.x - EPS)))
+      ) {
+        best = candidate;
+      }
+    });
   });
-
-  if (candidates.length === 0) {
-    // Nothing fits height-wise even after trying every rotation, but this
-    // is the first item in the instance — place the shortest orientation
-    // anyway (least overflow) and flag it rather than lose the item.
-    const shortest = orientationsFor(unit).reduce((best, o) => (o[2] < best[2] ? o : best));
-    const [ol, ow, oh] = shortest;
-    const drop = simulateDrop(container, ol, ow, oh, cursorX, cursorY, cursorZ, rowDepth, layerHeight);
-    return { ol, ow, oh, drop, exceedsHeight: true };
-  }
-
-  candidates.sort((a, b) => {
-    if (a.drop.wrapLevel !== b.drop.wrapLevel) return a.drop.wrapLevel - b.drop.wrapLevel;
-    if (a.drop.leftoverRow !== b.drop.leftoverRow) return a.drop.leftoverRow - b.drop.leftoverRow;
-    return a.oh - b.oh;
-  });
-  return candidates[0];
+  return best;
 }
 
 /**
- * Packs as many units as will fit into ONE container instance using the
- * layer+shelf sweep. Units that don't fit (would blow the height or weight
- * cap) are returned as `leftover` so the caller can open a new instance.
+ * Packs as many units as will fit into ONE container instance using
+ * guillotine free-space partitioning. Units that don't fit anywhere
+ * (would blow the height or weight cap) are returned as `leftover` so the
+ * caller can open a new container instance.
  *
  * The very first unit of an instance is always placed even if it alone
  * exceeds a limit (e.g. a single item taller than the container) — there's
- * nowhere else to put it, so it's placed and flagged rather than dropped
- * silently or looped on forever.
+ * nowhere else to put it, so it's placed and flagged rather than dropped.
  */
 function packOneContainer(container, units, colorByItem, colorState) {
+  let freeRegions = [{ x: 0, y: 0, z: 0, length: container.length, width: container.width, height: container.height }];
   const placements = [];
   const leftover = [];
-  let cursorX = 0;
-  let cursorY = 0;
-  let cursorZ = 0;
-  let rowDepth = 0;
-  let layerHeight = 0;
   let totalWeight = 0;
   let totalVolume = 0;
   let overhang = false;
@@ -195,32 +166,39 @@ function packOneContainer(container, units, colorByItem, colorState) {
       colorState.i += 1;
     }
 
-    // Try every rotation of this unit against the current cursor and take
-    // whichever orientation packs tightest (see chooseBestOrientation).
-    const choice = chooseBestOrientation(container, unit, cursorX, cursorY, cursorZ, rowDepth, layerHeight, placements.length === 0);
-    const { ol, ow, oh, drop, exceedsHeight } = choice;
     const wouldExceedWeight = totalWeight + unit.weight > container.maxWeight;
-
-    // Defer to the next container instance — unless this instance is still
-    // completely empty, in which case there's nowhere else for it to go.
-    if (placements.length > 0 && (exceedsHeight || wouldExceedWeight)) {
+    if (placements.length > 0 && wouldExceedWeight) {
       leftover.push(unit);
       return;
     }
 
-    cursorX = drop.x;
-    cursorY = drop.y;
-    cursorZ = drop.z;
-    rowDepth = drop.rowDepth;
-    layerHeight = drop.layerHeight;
+    let fit = findBestFit(freeRegions, unit);
+    let forcedOverflow = false;
+
+    if (!fit) {
+      if (placements.length > 0) {
+        // Doesn't fit anywhere in this instance — try again in the next one.
+        leftover.push(unit);
+        return;
+      }
+      // First item in the instance and it doesn't fit even the whole empty
+      // container in any rotation — place it anyway (shortest-height
+      // orientation, to minimize the overflow) and flag it for review.
+      const shortest = orientationsFor(unit).reduce((b, o) => (o[2] < b[2] ? o : b));
+      const [ol, ow, oh] = shortest;
+      fit = { regionIndex: 0, region: freeRegions[0], ol, ow, oh, wasted: 0 };
+      forcedOverflow = true;
+    }
+
+    const { region, ol, ow, oh, regionIndex } = fit;
 
     const placement = {
       unitId: unit.unitId,
       itemId: unit.itemId,
       name: unit.name,
-      x: cursorX,
-      y: cursorY,
-      z: cursorZ,
+      x: region.x,
+      y: region.y,
+      z: region.z,
       length: ol,
       width: ow,
       height: oh,
@@ -240,7 +218,7 @@ function packOneContainer(container, units, colorByItem, colorState) {
       placement.overhang = true;
       overhang = true;
     }
-    if (placement.z + placement.height > container.height) {
+    if (forcedOverflow || placement.z + placement.height > container.height) {
       placement.overHeight = true;
       overHeight = true; // only happens on a lone oversized item — see guard above
     }
@@ -249,7 +227,7 @@ function packOneContainer(container, units, colorByItem, colorState) {
     }
 
     if (placement.z > 0) {
-      const supports = placements.filter((p) => Math.abs(p.z + p.height - placement.z) < 0.01 && aabbOverlapXY(p, placement));
+      const supports = placements.filter((p) => Math.abs(p.z + p.height - placement.z) < EPS && aabbOverlapXY(p, placement));
       supports.forEach((support) => {
         if (support.fragile || support.maxStackWeight <= 0 || placement.weight > support.maxStackWeight) {
           placement.stackViolation = true;
@@ -262,9 +240,21 @@ function packOneContainer(container, units, colorByItem, colorState) {
     totalWeight += unit.weight;
     totalVolume += ol * ow * oh;
 
-    cursorX += ol;
-    rowDepth = Math.max(rowDepth, ow);
-    layerHeight = Math.max(layerHeight, oh);
+    // --- Guillotine split: carve the consumed region into up to 3 leftover
+    // free regions (right / front / above) and fold them back into the tree.
+    freeRegions.splice(regionIndex, 1);
+    const carved = [];
+    if (region.length - ol > EPS) {
+      carved.push({ x: region.x + ol, y: region.y, z: region.z, length: region.length - ol, width: region.width, height: region.height });
+    }
+    if (region.width - ow > EPS) {
+      carved.push({ x: region.x, y: region.y + ow, z: region.z, length: ol, width: region.width - ow, height: region.height });
+    }
+    if (region.height - oh > EPS) {
+      carved.push({ x: region.x, y: region.y, z: region.z + oh, length: ol, width: ow, height: region.height - oh });
+    }
+    freeRegions.push(...carved);
+    freeRegions = pruneContainedRegions(freeRegions);
   });
 
   return { placements, leftover, totalWeight, totalVolume, overhang, overHeight, overWeight, stackViolation };
@@ -304,8 +294,9 @@ export function runPacking(containerId, shipmentLines, itemsById) {
   const units = expandUnits(shipmentLines, itemsById);
 
   // Heaviest first => mass settles into the lowest layers of each instance
-  // (center-of-gravity rule). Ties broken by base footprint area (largest first).
-  units.sort((a, b) => b.weight - a.weight || b.length * b.width - a.length * a.width);
+  // (center-of-gravity rule). Ties broken by largest volume first, which is
+  // the standard "best-fit decreasing" ordering for space-efficient packing.
+  units.sort((a, b) => b.weight - a.weight || b.length * b.width * b.height - a.length * a.width * a.height);
 
   const colorByItem = {};
   const colorState = { i: 0 };
