@@ -1,7 +1,11 @@
-import { Minus, Plus, MapPin, Truck } from 'lucide-react';
+import { Minus, Plus, MapPin, Truck, ArrowUpDown } from 'lucide-react';
+import { CONTAINERS } from '../data/containers';
 
-export default function ShipmentBuilder({ items, shipment, setQty, setDestination, setAccessorial }) {
+export default function ShipmentBuilder({ items, shipment, setQty, setDestination, setAccessorial, setPalletHeight }) {
   const qtyFor = (itemId) => shipment.lines.find((l) => l.itemId === itemId)?.qty || 0;
+  const { standardHeight, maxHeightCap } = CONTAINERS.ltl_pallet;
+  const isPallet = shipment.containerId === 'ltl_pallet';
+  const extraInches = shipment.palletHeight - standardHeight;
 
   return (
     <div className="space-y-5">
@@ -44,6 +48,31 @@ export default function ShipmentBuilder({ items, shipment, setQty, setDestinatio
           </div>
         )}
       </div>
+
+      {isPallet && (
+        <div className="border-t border-ink-700 pt-4">
+          <p className="label-eyebrow flex items-center gap-1.5"><ArrowUpDown size={11} /> Pallet Height</p>
+          <p className="text-[11px] text-steel-400 mt-1 mb-2">
+            Standard is {standardHeight}". Carriers will quote up to {maxHeightCap}" as a non-standard pallet — raising it can mean fewer
+            pallets, traded off against an extended-height surcharge per pallet.
+          </p>
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              min={standardHeight}
+              max={maxHeightCap}
+              step={1}
+              value={shipment.palletHeight}
+              onChange={(e) => setPalletHeight(e.target.value)}
+              className="flex-1 accent-signal-amber cursor-pointer"
+            />
+            <span className="font-mono text-sm text-signal-amber w-16 text-right shrink-0">{shipment.palletHeight}"</span>
+          </div>
+          {extraInches > 0 && (
+            <p className="text-[11px] font-mono text-signal-amber mt-1.5">+{extraInches}" over standard — surcharge applies per pallet</p>
+          )}
+        </div>
+      )}
 
       <div className="border-t border-ink-700 pt-4">
         <p className="label-eyebrow flex items-center gap-1.5"><MapPin size={11} /> Route</p>

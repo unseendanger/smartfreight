@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { loadState, saveState } from '../data/storage';
+import { CONTAINERS } from '../data/containers';
 
 const DEFAULT_SHIPMENT = {
   containerId: 'ltl_pallet',
@@ -7,6 +8,7 @@ const DEFAULT_SHIPMENT = {
   originZip: '30301',
   destZip: '90210',
   accessorials: { liftgate: false, residential: false },
+  palletHeight: CONTAINERS.ltl_pallet.standardHeight, // 72" standard; adjustable up to maxHeightCap (96")
 };
 
 export function useShipment() {
@@ -44,9 +46,15 @@ export function useShipment() {
     setShipment((prev) => ({ ...prev, accessorials: { ...prev.accessorials, [field]: value } }));
   }, []);
 
+  const setPalletHeight = useCallback((height) => {
+    const { standardHeight, maxHeightCap } = CONTAINERS.ltl_pallet;
+    const clamped = Math.min(maxHeightCap, Math.max(standardHeight, Math.round(Number(height) || standardHeight)));
+    setShipment((prev) => ({ ...prev, palletHeight: clamped }));
+  }, []);
+
   const clearLines = useCallback(() => {
     setShipment((prev) => ({ ...prev, lines: [] }));
   }, []);
 
-  return { shipment, setContainerId, setQty, setDestination, setAccessorial, clearLines };
+  return { shipment, setContainerId, setQty, setDestination, setAccessorial, setPalletHeight, clearLines };
 }

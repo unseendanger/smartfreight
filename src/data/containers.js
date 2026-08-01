@@ -9,6 +9,8 @@ export const CONTAINERS = {
     length: 48,
     width: 40,
     height: 72,
+    standardHeight: 72, // baseline height freight pricing assumes
+    maxHeightCap: 96, // tallest a carrier will accept before it's a different freight class entirely
     maxWeight: 4600,
     footprint: { length: 48, width: 40 }, // used for the overhang fee check
     color: '#3DBFA8',

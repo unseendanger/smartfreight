@@ -9,6 +9,9 @@
 // all three so the effect of a packing violation is visible across options.
 // -----------------------------------------------------------------------
 
+import { CONTAINERS } from '../data/containers';
+
+
 const ACCESSORIAL_FEES = {
   liftgate: 95,
   residential: 115,
@@ -25,6 +28,13 @@ const OVER_WEIGHT_MULTIPLIER = 1.35; // spike, not a flat fee, per spec ("spikes
 // position" or per-unit rental/handling charge.
 const ADDITIONAL_PALLET_FEE = 45;
 const ADDITIONAL_UBOX_FEE = 180;
+
+// Charged per inch a pallet is raised above the 72" standard, per pallet
+// instance — mirrors what an LTL carrier quotes a "non-standard height"
+// pallet at. This is the cost side of the tradeoff the height slider makes
+// visible: a taller pallet can mean fewer pallets (fewer ADDITIONAL_PALLET_FEE
+// charges), but each pallet costs a bit more to move.
+const EXTENDED_HEIGHT_RATE_PER_INCH = 4;
 
 // Named carrier partners the simulation assigns to each option, so a quote
 // always says WHO is quoting it, not just a generic service description.
@@ -88,6 +98,14 @@ function applySurcharges(baseCost, packResult, accessorials) {
     cost += fee;
     const unitLabel = packResult.containerId === 'uhaul_ubox' ? 'U-Box' : 'Pallet';
     breakdown.push({ label: `Additional ${unitLabel} Handling (${extraCount} extra, ${packResult.totalContainers} total)`, amount: fee });
+  }
+  if (packResult.containerId === 'ltl_pallet') {
+    const extraInches = packResult.container.height - CONTAINERS.ltl_pallet.standardHeight;
+    if (extraInches > 0) {
+      const fee = Math.round(EXTENDED_HEIGHT_RATE_PER_INCH * extraInches * packResult.totalContainers);
+      cost += fee;
+      breakdown.push({ label: `Extended-Height Pallet (+${extraInches}", ×${packResult.totalContainers} pallets)`, amount: fee });
+    }
   }
   if (packResult.totalValue > HIGH_VALUE_THRESHOLD) {
     const rider = Math.round(packResult.totalValue * HIGH_VALUE_RATE);

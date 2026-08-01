@@ -15,7 +15,7 @@ import { Warehouse, Truck } from 'lucide-react';
 
 export default function App() {
   const { items, addItem, updateItem, deleteItem } = useInventory();
-  const { shipment, setContainerId, setQty, setDestination, setAccessorial } = useShipment();
+  const { shipment, setContainerId, setQty, setDestination, setAccessorial, setPalletHeight } = useShipment();
   const [leftTab, setLeftTab] = useState('inventory');
   const [stepIndex, setStepIndex] = useState(null); // null = show full load, within the selected instance
   const [selectedInstance, setSelectedInstance] = useState(0);
@@ -23,8 +23,8 @@ export default function App() {
   const itemsById = useMemo(() => Object.fromEntries(items.map((i) => [i.id, i])), [items]);
 
   const packResult = useMemo(
-    () => runPacking(shipment.containerId, shipment.lines, itemsById),
-    [shipment.containerId, shipment.lines, itemsById]
+    () => runPacking(shipment.containerId, shipment.lines, itemsById, shipment.palletHeight),
+    [shipment.containerId, shipment.lines, itemsById, shipment.palletHeight]
   );
 
   // Clamp the selected instance/step whenever the packing result changes shape
@@ -73,7 +73,14 @@ export default function App() {
           {leftTab === 'inventory' ? (
             <InventoryManager items={items} addItem={addItem} updateItem={updateItem} deleteItem={deleteItem} />
           ) : (
-            <ShipmentBuilder items={items} shipment={shipment} setQty={setQty} setDestination={setDestination} setAccessorial={setAccessorial} />
+            <ShipmentBuilder
+              items={items}
+              shipment={shipment}
+              setQty={setQty}
+              setDestination={setDestination}
+              setAccessorial={setAccessorial}
+              setPalletHeight={setPalletHeight}
+            />
           )}
         </aside>
 
@@ -82,6 +89,7 @@ export default function App() {
           <div className="flex items-center justify-between flex-wrap gap-2">
             <ContainerTabs
               activeId={shipment.containerId}
+              palletHeight={shipment.palletHeight}
               onSelect={(id) => {
                 setContainerId(id);
                 setSelectedInstance(0);

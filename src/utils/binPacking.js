@@ -111,29 +111,39 @@ function pruneContainedRegions(regions) {
 }
 
 /**
- * Searches every free region × every orientation of `unit` and returns the
- * best-fit placement: the one that wastes the least volume in its region,
- * tie-broken toward the floor (lower z) for stability, then toward the
- * region already closest to the origin so the pack stays contiguous rather
- * than scattering boxes across far-apart regions.
+ * Searches every remaining item TYPE × every free region × every
+ * orientation, and returns whichever combination wastes the least volume.
+ * Searching across types (not just the next unit in a fixed sort order) is
+ * what allows a smaller SKU to be chosen specifically to plug a gap left by
+ * a larger one — i.e. actual mixed-product packing on the same pallet,
+ * instead of exhausting one SKU before starting the next.
  */
-function findBestFit(freeRegions, unit) {
+function findGlobalBestFit(freeRegions, groups, remainingCapacity) {
   let best = null;
-  freeRegions.forEach((region, regionIndex) => {
-    orientationsFor(unit).forEach(([ol, ow, oh]) => {
-      if (ol > region.length + EPS || ow > region.width + EPS || oh > region.height + EPS) return;
-      const wasted = region.length * region.width * region.height - ol * ow * oh;
-      const candidate = { regionIndex, region, ol, ow, oh, wasted };
-      if (
-        !best ||
-        region.z < best.region.z - EPS ||
-        (Math.abs(region.z - best.region.z) <= EPS &&
-          (wasted < best.wasted - EPS ||
-            (Math.abs(wasted - best.wasted) <= EPS && region.y < best.region.y - EPS) ||
-            (Math.abs(wasted - best.wasted) <= EPS && Math.abs(region.y - best.region.y) <= EPS && region.x < best.region.x - EPS)))
-      ) {
-        best = candidate;
-      }
+  groups.forEach((group) => {
+    if (group.queue.length === 0) return;
+    const template = group.queue[0];
+    if (template.weight > remainingCapacity + EPS) return; // this SKU alone would bust the weight cap right now
+
+    freeRegions.forEach((region, regionIndex) => {
+      orientationsFor(template).forEach(([ol, ow, oh]) => {
+        if (ol > region.length + EPS || ow > region.width + EPS || oh > region.height + EPS) return;
+        const wasted = region.length * region.width * region.height - ol * ow * oh;
+        const candidate = { group, regionIndex, region, ol, ow, oh, wasted, weight: template.weight };
+        if (
+          !best ||
+          region.z < best.region.z - EPS ||
+          (Math.abs(region.z - best.region.z) <= EPS &&
+            (wasted < best.wasted - EPS ||
+              (Math.abs(wasted - best.wasted) <= EPS &&
+                (region.y < best.region.y - EPS ||
+                  (Math.abs(region.y - best.region.y) <= EPS &&
+                    (region.x < best.region.x - EPS ||
+                      (Math.abs(region.x - best.region.x) <= EPS && template.weight > best.weight)))))))
+        ) {
+          best = candidate;
+        }
+      });
     });
   });
   return best;
@@ -141,9 +151,12 @@ function findBestFit(freeRegions, unit) {
 
 /**
  * Packs as many units as will fit into ONE container instance using
- * guillotine free-space partitioning. Units that don't fit anywhere
- * (would blow the height or weight cap) are returned as `leftover` so the
- * caller can open a new container instance.
+ * guillotine free-space partitioning with GLOBAL best-fit across every
+ * remaining item type (see findGlobalBestFit) — so different SKUs actively
+ * interleave on the same pallet/U-Box rather than one type exhausting
+ * itself before the next starts. Units that don't fit anywhere (would blow
+ * the height or weight cap) are returned as `leftover` so the caller can
+ * open a new container instance.
  *
  * The very first unit of an instance is always placed even if it alone
  * exceeds a limit (e.g. a single item taller than the container) — there's
@@ -152,7 +165,15 @@ function findBestFit(freeRegions, unit) {
 function packOneContainer(container, units, colorByItem, colorState) {
   let freeRegions = [{ x: 0, y: 0, z: 0, length: container.length, width: container.width, height: container.height }];
   const placements = [];
-  const leftover = [];
+
+  // Group remaining units by item type — each group is a FIFO queue of that
+  // SKU's individual unit records (so unitId stays unique per instance).
+  const groups = new Map();
+  units.forEach((unit) => {
+    if (!groups.has(unit.itemId)) groups.set(unit.itemId, { itemId: unit.itemId, queue: [] });
+    groups.get(unit.itemId).queue.push(unit);
+  });
+
   let totalWeight = 0;
   let totalVolume = 0;
   let overhang = false;
@@ -160,37 +181,41 @@ function packOneContainer(container, units, colorByItem, colorState) {
   let overWeight = false;
   let stackViolation = false;
 
-  units.forEach((unit) => {
-    if (!colorByItem[unit.itemId]) {
-      colorByItem[unit.itemId] = PALETTE[colorState.i % PALETTE.length];
-      colorState.i += 1;
-    }
+  const anyRemaining = () => Array.from(groups.values()).some((g) => g.queue.length > 0);
 
-    const wouldExceedWeight = totalWeight + unit.weight > container.maxWeight;
-    if (placements.length > 0 && wouldExceedWeight) {
-      leftover.push(unit);
-      return;
-    }
+  while (anyRemaining()) {
+    Array.from(groups.keys()).forEach((itemId) => {
+      const unit = groups.get(itemId).queue[0];
+      if (unit && !colorByItem[unit.itemId]) {
+        colorByItem[unit.itemId] = PALETTE[colorState.i % PALETTE.length];
+        colorState.i += 1;
+      }
+    });
 
-    let fit = findBestFit(freeRegions, unit);
+    const remainingCapacity = container.maxWeight - totalWeight;
+    let fit = findGlobalBestFit(freeRegions, groups, remainingCapacity);
     let forcedOverflow = false;
+    let forcedGroup = null;
 
     if (!fit) {
       if (placements.length > 0) {
-        // Doesn't fit anywhere in this instance — try again in the next one.
-        leftover.push(unit);
-        return;
+        // Nothing left fits this instance at all (weight or space) — the
+        // rest carries over to a fresh container instance.
+        break;
       }
       // First item in the instance and it doesn't fit even the whole empty
       // container in any rotation — place it anyway (shortest-height
       // orientation, to minimize the overflow) and flag it for review.
-      const shortest = orientationsFor(unit).reduce((b, o) => (o[2] < b[2] ? o : b));
+      forcedGroup = Array.from(groups.values()).find((g) => g.queue.length > 0);
+      const template = forcedGroup.queue[0];
+      const shortest = orientationsFor(template).reduce((b, o) => (o[2] < b[2] ? o : b));
       const [ol, ow, oh] = shortest;
-      fit = { regionIndex: 0, region: freeRegions[0], ol, ow, oh, wasted: 0 };
+      fit = { group: forcedGroup, regionIndex: 0, region: freeRegions[0], ol, ow, oh, wasted: 0 };
       forcedOverflow = true;
     }
 
-    const { region, ol, ow, oh, regionIndex } = fit;
+    const { group, region, ol, ow, oh, regionIndex } = fit;
+    const unit = group.queue.shift();
 
     const placement = {
       unitId: unit.unitId,
@@ -255,7 +280,10 @@ function packOneContainer(container, units, colorByItem, colorState) {
     }
     freeRegions.push(...carved);
     freeRegions = pruneContainedRegions(freeRegions);
-  });
+  }
+
+  const leftover = [];
+  groups.forEach((group) => leftover.push(...group.queue));
 
   return { placements, leftover, totalWeight, totalVolume, overhang, overHeight, overWeight, stackViolation };
 }
@@ -288,9 +316,22 @@ function computeCenterOfGravity(placements, totalWeight, container) {
  * Runs the packing heuristic for a given container id and shipment lines.
  * Automatically spans as many container INSTANCES as the load requires
  * (e.g. "Pallet 1 of 3") rather than overflowing a single one.
+ *
+ * `heightOverrideInches` lets the caller raise a pallet's usable height up
+ * to its `maxHeightCap` (real LTL carriers will quote a taller-than-standard
+ * pallet as a different, non-standard freight arrangement rather than
+ * refuse it outright). It's ignored for containers with a fixed physical
+ * height (e.g. the U-Box, which is a real product with real dimensions).
  */
-export function runPacking(containerId, shipmentLines, itemsById) {
-  const container = CONTAINERS[containerId];
+export function runPacking(containerId, shipmentLines, itemsById, heightOverrideInches = null) {
+  const baseContainer = CONTAINERS[containerId];
+  let effectiveHeight = baseContainer.height;
+  if (heightOverrideInches && baseContainer.maxHeightCap) {
+    effectiveHeight = Math.min(baseContainer.maxHeightCap, Math.max(baseContainer.standardHeight ?? baseContainer.height, heightOverrideInches));
+  }
+  // Never mutate the shared CONTAINERS preset — build a fresh object per run.
+  const container = { ...baseContainer, height: effectiveHeight };
+
   const units = expandUnits(shipmentLines, itemsById);
 
   // Heaviest first => mass settles into the lowest layers of each instance
