@@ -9,6 +9,7 @@ const DEFAULT_SHIPMENT = {
   destZip: '90210',
   accessorials: { liftgate: false, residential: false },
   palletHeight: CONTAINERS.ltl_pallet.standardHeight, // 72" standard; adjustable up to maxHeightCap (96")
+  nonStackable: false, // real LTL "non-stackable" freight class — no item may rest on another
 };
 
 export function useShipment() {
@@ -52,9 +53,13 @@ export function useShipment() {
     setShipment((prev) => ({ ...prev, palletHeight: clamped }));
   }, []);
 
+  const setNonStackable = useCallback((value) => {
+    setShipment((prev) => ({ ...prev, nonStackable: value }));
+  }, []);
+
   const clearLines = useCallback(() => {
     setShipment((prev) => ({ ...prev, lines: [] }));
   }, []);
 
-  return { shipment, setContainerId, setQty, setDestination, setAccessorial, setPalletHeight, clearLines };
+  return { shipment, setContainerId, setQty, setDestination, setAccessorial, setPalletHeight, setNonStackable, clearLines };
 }

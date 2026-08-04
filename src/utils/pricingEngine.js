@@ -36,6 +36,11 @@ const ADDITIONAL_UBOX_FEE = 180;
 // charges), but each pallet costs a bit more to move.
 const EXTENDED_HEIGHT_RATE_PER_INCH = 4;
 
+// Real LTL carriers quote "non-stackable" freight (nothing else may be
+// stacked on your pallet in the trailer) as its own accessorial, since it
+// costs the carrier trailer space they can't sell to another shipper.
+const NON_STACKABLE_FEE_PER_CONTAINER = 60;
+
 // Named carrier partners the simulation assigns to each option, so a quote
 // always says WHO is quoting it, not just a generic service description.
 // The pick is deterministic (hashed from the route + load), so the same
@@ -107,6 +112,11 @@ function applySurcharges(baseCost, packResult, accessorials) {
       breakdown.push({ label: `Extended-Height Pallet (+${extraInches}", ×${packResult.totalContainers} pallets)`, amount: fee });
     }
   }
+  if (packResult.nonStackable) {
+    const fee = NON_STACKABLE_FEE_PER_CONTAINER * packResult.totalContainers;
+    cost += fee;
+    breakdown.push({ label: `Non-Stackable Freight Accessorial (×${packResult.totalContainers})`, amount: fee });
+  }
   if (packResult.totalValue > HIGH_VALUE_THRESHOLD) {
     const rider = Math.round(packResult.totalValue * HIGH_VALUE_RATE);
     cost += rider;
@@ -170,6 +180,7 @@ export function generateCarrierOptions(packResult, shipmentContext) {
     if (packResult.overhangDetected) risk += 10;
     if (hasFragileItems) risk += 8;
     if (packResult.totalContainers > 1) risk += Math.min(15, (packResult.totalContainers - 1) * 4);
+    if (packResult.nonStackable) risk -= 6;
     return Math.min(100, Math.max(0, risk));
   };
 

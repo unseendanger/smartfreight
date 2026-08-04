@@ -15,7 +15,7 @@ import { Warehouse, Truck } from 'lucide-react';
 
 export default function App() {
   const { items, addItem, updateItem, deleteItem } = useInventory();
-  const { shipment, setContainerId, setQty, setDestination, setAccessorial, setPalletHeight } = useShipment();
+  const { shipment, setContainerId, setQty, setDestination, setAccessorial, setPalletHeight, setNonStackable } = useShipment();
   const [leftTab, setLeftTab] = useState('inventory');
   const [stepIndex, setStepIndex] = useState(null); // null = show full load, within the selected instance
   const [selectedInstance, setSelectedInstance] = useState(0);
@@ -23,8 +23,8 @@ export default function App() {
   const itemsById = useMemo(() => Object.fromEntries(items.map((i) => [i.id, i])), [items]);
 
   const packResult = useMemo(
-    () => runPacking(shipment.containerId, shipment.lines, itemsById, shipment.palletHeight),
-    [shipment.containerId, shipment.lines, itemsById, shipment.palletHeight]
+    () => runPacking(shipment.containerId, shipment.lines, itemsById, shipment.palletHeight, shipment.nonStackable),
+    [shipment.containerId, shipment.lines, itemsById, shipment.palletHeight, shipment.nonStackable]
   );
 
   // Clamp the selected instance/step whenever the packing result changes shape
@@ -80,6 +80,7 @@ export default function App() {
               setDestination={setDestination}
               setAccessorial={setAccessorial}
               setPalletHeight={setPalletHeight}
+              setNonStackable={setNonStackable}
             />
           )}
         </aside>

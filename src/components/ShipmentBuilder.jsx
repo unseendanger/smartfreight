@@ -1,7 +1,7 @@
-import { Minus, Plus, MapPin, Truck, ArrowUpDown } from 'lucide-react';
+import { Minus, Plus, MapPin, Truck, ArrowUpDown, Layers } from 'lucide-react';
 import { CONTAINERS } from '../data/containers';
 
-export default function ShipmentBuilder({ items, shipment, setQty, setDestination, setAccessorial, setPalletHeight }) {
+export default function ShipmentBuilder({ items, shipment, setQty, setDestination, setAccessorial, setPalletHeight, setNonStackable }) {
   const qtyFor = (itemId) => shipment.lines.find((l) => l.itemId === itemId)?.qty || 0;
   const { standardHeight, maxHeightCap } = CONTAINERS.ltl_pallet;
   const isPallet = shipment.containerId === 'ltl_pallet';
@@ -73,6 +73,22 @@ export default function ShipmentBuilder({ items, shipment, setQty, setDestinatio
           )}
         </div>
       )}
+
+      <div className="border-t border-ink-700 pt-4">
+        <p className="label-eyebrow flex items-center gap-1.5"><Layers size={11} /> Stacking</p>
+        <label className="flex items-start justify-between gap-3 px-3 py-2 mt-2 rounded-lg bg-ink-800/50 border border-ink-700 cursor-pointer">
+          <span>
+            <span className="text-sm text-steel-300 block">Non-Stackable Load</span>
+            <span className="text-[11px] text-steel-400">Nothing may rest on anything else — one layer per pallet/U-Box, more units required.</span>
+          </span>
+          <input
+            type="checkbox"
+            className="accent-signal-coral w-4 h-4 mt-0.5 shrink-0"
+            checked={shipment.nonStackable}
+            onChange={(e) => setNonStackable(e.target.checked)}
+          />
+        </label>
+      </div>
 
       <div className="border-t border-ink-700 pt-4">
         <p className="label-eyebrow flex items-center gap-1.5"><MapPin size={11} /> Route</p>
